@@ -60,3 +60,10 @@ test('报销和投资统计覆盖其他分页，文件格式和交易类型筛�
  a.set(filter('receipts:'+p.id+':'+testMonth,'format'),'PNG');assert.equal(a.root.querySelectorAll('tbody tr').length,1);assert.match(a.text(),/1 份单据 · 10 B/);assert.match(a.root.querySelector('tbody').textContent,/单据24.png/);
  await a.click('go','life');await a.click('go','finance');await a.click('tab','invest');assert.equal(a.root.querySelectorAll('tbody tr').length,20);assert.match(a.root.querySelector('.finance-summary').textContent,/275.00/);a.set(filter('invest','type'),'卖出');assert.match(a.text(),/共 0 条/);assert.doesNotMatch(a.root.querySelector('.finance-summary').textContent,/275.00/);
 });
+test('中文组合输入期间后台刷新不替换输入节点，确认后按完整文字搜索',async t=>{
+ const a=await app(t,[{id:'b',kind:'business',title:'中文业务',_path:'b.md'}]);await a.click('go','work');await a.click('go','business');const el=a.root.querySelector(filter('business:','query')),Event=a.root.ownerDocument.defaultView.Event;
+ el.dispatchEvent(new Event('compositionstart',{bubbles:true}));el.value='zhong';const input=new Event('input',{bubbles:true});input.isComposing=true;el.dispatchEvent(input);await a.refresh();assert.ok(a.root.querySelector(filter('business:','query'))===el,'组合输入期间保留原始输入节点');assert.equal(el.value,'zhong');el.value='中文';el.dispatchEvent(new Event('compositionend',{bubbles:true}));assert.equal(a.root.querySelector(filter('business:','query')).value,'中文');
+});
+test('内部项目课程和收件箱详情导航回到页首，原生打开仍保留列表位置',async t=>{
+ const a=await app(t,[{id:'p',kind:'project',title:'项目',status:'进行中'},{id:'c',kind:'course',title:'课程',total:'10',completed:'0'},{id:'i',kind:'inbox',text:'收件内容',type:'随手记'}]);await a.click('go','work');await a.click('go','projects');a.setScroll(800);await a.click('open-record','p');assert.equal(a.getScroll(),0);await a.click('go','learn');await a.click('go','reading');a.setScroll(800);await a.click('open-record','c');assert.equal(a.getScroll(),0);await a.click('go','inbox');a.setScroll(800);await a.click('open-capture','i');assert.equal(a.getScroll(),0);
+});
