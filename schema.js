@@ -25,4 +25,5 @@ invest:{name:'投资流水',add:'记录投资交易',folder:'20 生活 / 03 家�
 };
 
 schemas.inbox={name:'收件箱',fields:[F('type','记录类型','select',true,['随手记','学习收获','待解决问题']),F('text','记录内容','textarea',true)]};
+for(const kind of ['business','methods','study','experiment','requirements','decisions','development','validation'])schemas[kind].document=true;
 module.exports={schemas};
