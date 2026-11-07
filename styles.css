@@ -67,3 +67,14 @@
 #life-atlas-studio .la-schedule-dialog input,#life-atlas-studio .la-schedule-dialog select,#life-atlas-studio .la-schedule-dialog textarea{width:100%;box-sizing:border-box}
 #life-atlas-studio .la-schedule-dialog .edit-actions{justify-content:flex-end;margin-top:18px}
 @media(max-width:600px){#life-atlas-studio .la-schedule-dialog{padding:20px}#life-atlas-studio .la-schedule-dialog .edit-grid{grid-template-columns:1fr}}
+
+/* Lists: bounded pages, compact controls, responsive without changing note content. */
+#life-atlas-studio .la-list-controls{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:8px 0 18px}
+#life-atlas-studio .la-list-controls label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text-muted);min-width:120px}
+#life-atlas-studio .la-list-controls label:first-child{flex:1;min-width:180px;max-width:340px}
+#life-atlas-studio .la-list-controls .la-input{width:100%;min-height:42px}
+#life-atlas-studio .la-list-controls .la-button{min-height:42px}
+#life-atlas-studio .la-pagination{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;border-top:1px solid var(--background-modifier-border);padding-top:16px;margin-top:16px}
+#life-atlas-studio .la-pagination>div{display:flex;gap:8px}
+#life-atlas-studio .la-pagination button:disabled{opacity:.4;cursor:default;pointer-events:none}
+@media(max-width:640px){#life-atlas-studio .la-list-controls label,#life-atlas-studio .la-list-controls label:first-child{flex:1 1 140px;max-width:none}#life-atlas-studio .la-pagination{align-items:flex-start}}
