@@ -2,6 +2,7 @@ const field=(key,label,type='text',required=false,options=null)=>({key,label,typ
 const F=field;
 const schemas={
 project:{name:'项目',add:'新建项目',folder:'10 工作 / 01 项目',fields:[F('title','项目名称','text',true),F('goal','项目目标','textarea',true),F('next','下一步行动'),F('status','项目状态','select',true,['进行中','暂停','已完成']),F('due','目标日期','date')]},
+schedule:{name:'排期任务',add:'新增任务',folder:'排期与分工',project:true,fields:[F('title','任务名称','text',true),F('requirement','关联需求'),F('owner','负责人'),F('collaborators','协作人'),F('start','计划开始','date'),F('end','计划结束','date'),F('hours','预计工时（小时）','decimal'),F('status','状态','select',true,['未开始','进行中','待验证','已完成','阻塞']),F('note','备注','textarea')]},
 requirements:{name:'需求文档',folder:'需求',project:true,fields:[F('title','文档标题','text',true),F('goal','背景与目标','textarea',true),F('scope','需求范围','textarea'),F('accept','验收标准','textarea',true),F('status','状态','select',true,['草稿','待确认','已确认'])]},
 decisions:{name:'方案决策',folder:'设计与决策',project:true,fields:[F('title','方案名称','text',true),F('options','备选方案与取舍','textarea',true),F('decision','选定方案与原因','textarea'),F('constraints','约束与待验证点','textarea')]},
 development:{name:'开发排障记录',folder:'开发与排障',project:true,fields:[F('title','问题或实现主题','text',true),F('repro','现象与复现条件','textarea',true),F('cause','定位过程与根因','textarea'),F('fix','修复方案与验证结果','textarea')]},
