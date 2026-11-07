@@ -54,3 +54,16 @@
   flex-direction:column;
   gap:8px;
 }
+
+#life-atlas-studio .la-schedule-table{min-width:1000px}
+#life-atlas-studio .la-schedule-table th{white-space:nowrap}
+#life-atlas-studio .la-schedule-table td{vertical-align:top}
+#life-atlas-studio .la-schedule-table td:first-child{min-width:200px;max-width:320px;overflow-wrap:anywhere}
+#life-atlas-studio .la-schedule-note{min-width:150px;max-width:280px;white-space:pre-wrap;overflow-wrap:anywhere}
+#life-atlas-studio .la-schedule-dialog{box-sizing:border-box;width:min(760px,calc(100vw - 40px));max-width:calc(100vw - 40px);max-height:85vh;overflow:auto;margin:auto;padding:28px;border:1px solid var(--la-line);border-radius:20px;background:var(--la-panel);color:var(--la-ink);box-shadow:0 24px 80px #0003}
+#life-atlas-studio .la-schedule-dialog::backdrop{background:rgb(25 25 35 / 45%)}
+#life-atlas-studio .la-schedule-dialog .edit-grid{margin-top:16px}
+#life-atlas-studio .la-schedule-dialog label{min-width:0}
+#life-atlas-studio .la-schedule-dialog input,#life-atlas-studio .la-schedule-dialog select,#life-atlas-studio .la-schedule-dialog textarea{width:100%;box-sizing:border-box}
+#life-atlas-studio .la-schedule-dialog .edit-actions{justify-content:flex-end;margin-top:18px}
+@media(max-width:600px){#life-atlas-studio .la-schedule-dialog{padding:20px}#life-atlas-studio .la-schedule-dialog .edit-grid{grid-template-columns:1fr}}
