@@ -6,6 +6,8 @@ const options=(items,value)=>items.map(([v,label])=>`<option value="${esc(v)}"${
 function requirementOptions(rows,requirements){const items=requirements.map(r=>[r.id,r.title]);for(const r of rows)if(r.requirement&&!items.some(([id])=>id===r.requirement))items.push([r.requirement,'原需求已移除']);return items;}
 function table(rows,requirements,filters){
  const reqs=requirementOptions(rows,requirements),owners=[...new Set(rows.map(r=>r.owner).filter(Boolean))].sort();
+ if(filters.owner&&!owners.includes(filters.owner))owners.push(filters.owner);
+ if(filters.requirement&&!reqs.some(([id])=>id===filters.requirement))reqs.push([filters.requirement,'原需求已移除']);
  const visible=rows.filter(r=>(!filters.requirement||r.requirement===filters.requirement)&&(!filters.owner||r.owner===filters.owner)&&(!filters.status||r.status===filters.status));
  const filter=(id,label,items,value)=>`<label>${label}<select class="la-input" id="schedule-${id}">${options([['','全部'],...items],value)}</select></label>`;
  return `<div class="finance-toolbar"><div class="finance-filters">${filter('requirement','关联需求',reqs,filters.requirement)}${filter('owner','负责人',owners.map(x=>[x,x]),filters.owner)}${filter('status','状态',schemas.schedule.fields.find(f=>f.key==='status').options.map(x=>[x,x]),filters.status)}</div>${button('new','＋ 新增任务','schedule')}</div>
