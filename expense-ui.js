@@ -1,83 +1,145 @@
 'use strict';
-const {states,expenseRows}=require('./expenses');
 
-module.exports=function expenseDesk({root,api,esc,btn,box,money,listView,render,operation,reload,scope}){
- let loaded=null,version=null,records=[],receipts=[],archive=false,dialog=null;
- const selected=new Set();
- const key=(p,m)=>JSON.stringify([p,m]);
- const current=()=>key(...scope())===loaded;
- const rows=()=>current()?expenseRows(records,receipts):[];
- const button=(action,label,id='',style='la-button secondary')=>btn('expense-'+action,label,id,style);
- function set(project,month,ledger,files){
-  if(key(project,month)!==key(...scope()))return;
-  if(loaded!==key(project,month)||ledger.raw!==version)selected.clear();
-  loaded=key(project,month);version=ledger.raw;records=ledger.rows;receipts=files;
+function monthOffset(month, offset) {
+ const [year, number] = month.split('-').map(Number);
+ const index = year * 12 + number - 1 + offset;
+ return Math.floor(index / 12) + '-' + String((index % 12) + 1).padStart(2, '0');
+}
+
+module.exports = function expenseDesk({root, api, esc, btn, box, money, listView, render, operation, reload, scope}) {
+ let loaded, version, records = [], receipts = [], archive = false, dialog;
+ // Store exceptions so newly received files are selected without losing manual choices on refresh.
+ const excluded = new Set();
+ const scopeKey = () => JSON.stringify(scope());
+ const action = (name, label, value = '', css = 'la-button secondary') => btn('expense-' + name, label, value, css);
+ const current = () => loaded === scopeKey();
+ function reset() {
+  archive = false;
+  excluded.clear();
+  loaded = null;
  }
- function page(){
-  const all=rows(),filters=[{key:'status',label:'报销状态',options:states.map(s=>[s,s])}];
-  const v=listView('expenses:'+loaded,all,{filters,search:r=>[r.title,...r.files].join(' '),searchLabel:'费用说明或文件名'});
-  const visibleIds=new Set(v.items.map(r=>r.id));
-  for(const id of selected)if(!visibleIds.has(id))selected.delete(id);
-  const picked=all.filter(r=>selected.has(r.id));
-  const advance=(from,to,label)=>'<button type="button" class="la-button secondary" data-act="expense-advance" data-value="'+to+'" '+(picked.length&&picked.every(r=>r.status===from)?'':'disabled')+'>'+label+'</button>';
-  const summary=states.slice(1).map(state=>box(state,'<strong>'+money(all.filter(r=>r.status===state).reduce((n,r)=>n+r.cents,0))+'</strong>')).join('');
-  const table=v.items.map(r=>`<tr><td><input type="checkbox" aria-label="选择 ${esc(r.title)}" data-expense-select="${esc(r.id)}" ${selected.has(r.id)?'checked':''}></td><td>${button('edit',esc(r.title),r.id,'la-link')}<div class="la-small la-muted">${r.files.length} 份单据 · ${esc(r.files[0])}</div></td><td>${r.cents===null?'待补金额':money(r.cents)}</td><td>${esc(r.status)}</td></tr>`).join('');
-  const actions='<div class="edit-actions">已选 '+selected.size+' 笔 '+advance('待提交','待到账','标记已提交')+advance('待到账','已到账','确认到账')+'</div>';
-  return '<div class="finance-summary">'+summary+'</div>'+box('费用明细',v.controls+actions+'<div class="ledger-scroll"><table class="ledger-table"><thead><tr><th>选择</th><th>费用 / 单据</th><th>报销金额</th><th>状态</th></tr></thead><tbody>'+table+'</tbody></table></div>'+(table?'':'<p class="la-empty">当前没有符合条件的费用。</p>')+v.pager,button('add','＋ 收单据','','la-button'));
+ function set(project, month, ledger, files) {
+  const key = JSON.stringify([project, month]);
+  if (key !== scopeKey()) return;
+  if (loaded !== key) excluded.clear();
+  loaded = key;
+  version = ledger.raw;
+  records = ledger.rows;
+  receipts = files;
+  const available = new Set(pending().map(r => r.file.name));
+  for (const name of excluded) if (!available.has(name)) excluded.delete(name);
  }
- function close(){dialog?.remove();dialog=null}
- function form(row,initialFiles=[]){
-  const [project,month]=scope(),expected=version;
-  const files=new Map(),assigned=new Set(records.flatMap(r=>r.files));
-  const candidates=receipts.filter(r=>!assigned.has(r.file.name)&&!row?.files.includes(r.file.name));
-  const originals=(row?.files||[]).map(name=>{
-   const f=receipts.find(r=>r.file.name===name);
-   return f?'<button type="button" class="la-link" data-original="'+esc(f._path)+'">'+esc(name)+'</button>':esc(name)+'（文件缺失）';
+ function pending() {
+  if (!current()) return [];
+  const linked = new Set(records.flatMap(r => r.files));
+  return receipts.filter(r => !linked.has(r.file.name));
+ }
+ function monthRail(month) {
+  const now = new Date(), thisMonth = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+  const periods = [...new Set([thisMonth, monthOffset(thisMonth,-1), monthOffset(thisMonth,-2), month])].sort().reverse();
+  const buttons = periods.map(value => {
+   return btn('receipt-period', (value.slice(0,4) === thisMonth.slice(0,4) ? '' : value.slice(0,4) + ' 年 ') + Number(value.slice(5)) + ' 月', value, 'la-pill' + (value === month ? ' active' : ''));
   });
-  dialog=root.ownerDocument.createElement('dialog');dialog.className='la-editor-dialog';dialog.setAttribute('aria-label',row?'编辑报销费用':'收单据');
-  dialog.innerHTML=box(row?'编辑报销费用':'收单据',`<form class="expense-form"><p class="la-caption">${esc(month)} · 同一笔费用可附多份单据</p>${originals.join(' · ')}
-  <label>添加原始单据<input type="file" multiple></label><div class="expense-pending"></div>
-  ${candidates.length?'<details><summary>从本月待整理单据中选择（'+candidates.length+'）</summary>'+candidates.map(r=>'<label><input type="checkbox" value="'+esc(r.file.name)+'"> '+esc(r.file.name)+'</label>').join('')+'</details>':''}
-  <label>费用说明<input class="la-input" name="title" maxlength="160" value="${esc(row?.title||'')}" placeholder="可稍后填写"></label>
-  <label>报销金额（元）<input class="la-input" name="amount" type="number" min="0.01" step="0.01" value="${row?.cents!=null?(row.cents/100).toFixed(2):''}" ${row&&states.indexOf(row.status)>=2?'readonly':''} placeholder="可稍后填写"></label>
-  <p role="alert" class="la-feedback"></p><div class="edit-actions"><button type="button" class="la-button secondary" data-dismiss>取消</button><button type="submit" class="la-button">保存</button></div></form>`);
+  return '<nav class="expense-months" aria-label="切换报销月份">' + buttons.join('') + '</nav>';
+ }
+ function claims(month) {
+  const v = listView('claims:' + scopeKey(), current() ? records : []);
+  const rows = v.items.map(row => {
+   const status = row.status === '待整理' ? '待补金额' : row.status;
+   const next = row.status === '待提交' ? '标记已提交' : row.status === '待到账' ? '确认到账' : '';
+   return '<tr><td>' + action('edit',esc(row.title),row.id,'la-link') + '</td><td>' + row.files.length +
+    ' 份附件</td><td>' + (row.cents === null ? '—' : money(row.cents)) + '</td><td>' + esc(status) +
+    '</td><td>' + (next ? action('advance',next,row.id) : '') + '</td></tr>';
+  });
+  const table = '<div class="ledger-scroll"><table class="ledger-table"><thead><tr><th>报销单</th><th>附件</th><th>金额</th><th>状态</th><th>操作</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+  return box('本月报销单', rows.length ? table + (v.pages > 1 ? v.pager : '') : '<p class="la-empty">本月还没有报销单。</p>',
+   btn('receipt-period','查看上月',monthOffset(month,-1),'la-link'));
+ }
+ function page(feedback = '') {
+  const month = scope()[1], files = pending(), count = files.filter(r => !excluded.has(r.file.name)).length;
+  const v = listView('pending:' + scopeKey(), files);
+  const drop = '<section class="receipt-drop expense-drop"><label class="receipt-picker">拖入本月单据，或选择文件<input id="receipt-files" type="file" multiple aria-label="选择本月单据"></label></section>';
+  const items = v.items.map(r => '<div class="expense-file"><input type="checkbox" data-pick="' + esc(r.file.name) +
+   '" aria-label="选择 ' + esc(r.file.name) + '"' + (excluded.has(r.file.name) ? '' : ' checked') + '>' +
+   btn('receipt-open',esc(r.file.name),r.id,'la-link') + '</div>');
+  const head = files.length ? '<label class="expense-file"><input type="checkbox" data-pick-all ' +
+   (count === files.length ? 'checked' : '') + ' aria-checked="' + (count && count < files.length ? 'mixed' : String(count > 0)) + '">全选本月待报单据（' + files.length + ' 份）</label>' : '';
+  const footer = '<div class="expense-selection"><span aria-live="polite">已选 ' + count + ' 份</span><button type="button" data-act="expense-generate" class="la-button"' +
+   (count ? '' : ' disabled') + '>生成本月报销单</button></div>';
+  const body = drop + feedback + head + (items.join('') || '<p class="la-empty">本月没有待报单据。</p>') + (v.pages > 1 ? v.pager : '') + footer;
+  return '<div class="expense-layout">' + monthRail(month) + '<div class="expense-main">' + box(Number(month.slice(5)) + ' 月待报单据',body) + claims(month) + '</div></div>';
+ }
+ function close() { dialog?.remove(); dialog = null; }
+ function form(row, names) {
+  const [project, month] = scope(), expected = version;
+  const defaultTitle = Number(month.slice(5)) + ' 月报销单';
+  const locked = row && ['待到账','已到账'].includes(row.status);
+  const originals = new Map(receipts.map(r => [r.file.name,r]));
+  const links = names.map(name => originals.has(name)
+   ? '<button type="button" class="la-link" data-original="' + esc(originals.get(name)._path) + '">' + esc(name) + '</button>'
+   : '<span>' + esc(name) + '（文件缺失）</span>');
+  const heading = row ? '报销单详情' : '生成本月报销单';
+  dialog = root.ownerDocument.createElement('dialog');
+  dialog.className = 'la-editor-dialog';
+  dialog.setAttribute('aria-label', heading);
+  dialog.innerHTML = box(heading,'<form class="expense-form"><p class="la-caption">' + esc(month) + ' · ' + names.length + ' 份原始单据</p><details><summary>查看附件</summary><div class="expense-originals">' + links.join('') +
+   '</div></details><label>报销单名称<input name="title" class="la-input" maxlength="160" required value="' + esc(row?.title || defaultTitle) +
+   '"></label><label>报销总额（元）<input type="number" name="amount" class="la-input" min="0.01" max="999999999.99" step="0.01" placeholder="可稍后填写" value="' +
+   (row?.cents != null ? (row.cents/100).toFixed(2) : '') + '"' + (locked ? ' readonly' : '') + '></label><p class="la-feedback" role="alert"></p><div class="edit-actions"><button type="button" data-dismiss class="la-button secondary">取消</button><button type="submit" class="la-button">' +
+   (row ? '保存' : '生成报销单') + '</button></div></form>');
   root.append(dialog);
-  const field=s=>dialog.querySelector(s),feedback=field('[role=alert]'),picker=field('[type=file]');
-  let saving=false;
-  function add(picks){
-   const skipped=[];
-   for(const f of picks){if(/\.(md|markdown)$/i.test(f.name)||files.has(f.name)||receipts.some(r=>r.file.name===f.name))skipped.push(f.name);else files.set(f.name,f);}
-   field('.expense-pending').textContent=[...files.keys()].join(' · ');
-   feedback.textContent=skipped.length?'已跳过同名文件或 Markdown：'+skipped.join('、'):'';
-  }
-  add(initialFiles);
-  picker.onchange=()=>{add(picker.files);picker.value=''};
-  dialog.ondragover=e=>e.preventDefault();dialog.ondrop=e=>{e.preventDefault();if(!saving)add(e.dataTransfer.files)};
-  dialog.querySelectorAll('[data-original]').forEach(b=>b.onclick=()=>api.open(b.dataset.original).catch(e=>feedback.textContent=e.message));
-  field('[data-dismiss]').onclick=()=>{if(!saving)close()};
-  dialog.oncancel=e=>{e.preventDefault();if(!saving)close()};
-  field('form').onsubmit=async e=>{
-   e.preventDefault();if(saving)return;saving=true;
-   const controls=[...dialog.querySelectorAll('button,input')];controls.forEach(c=>c.disabled=true);
-   try{
-    const uploads=await Promise.all([...files.values()].map(async f=>({name:f.name,data:await f.arrayBuffer()})));
-    const attach=[...dialog.querySelectorAll('[type=checkbox]:checked')].map(c=>c.value);
-    await api.writeExpense(project,month,expected,{id:row?.id,title:field('[name=title]').value,amount:field('[name=amount]').value,attach,uploads});
-   }catch(err){feedback.textContent=err.message;controls.forEach(c=>c.disabled=false);saving=false;return}
-   close();await operation(reload);
+  const field = selector => dialog.querySelector(selector), feedback = field('[role=alert]');
+  let saving = false;
+  dialog.querySelectorAll('[data-original]').forEach(b => b.onclick = () => api.open(b.dataset.original).catch(e => feedback.textContent = e.message));
+  field('[data-dismiss]').onclick = () => { if (!saving) close(); };
+  dialog.oncancel = e => { e.preventDefault(); if (!saving) close(); };
+  field('form').onsubmit = async e => {
+   e.preventDefault();
+   if (saving) return;
+   const title = field('[name=title]').value.trim();
+   if (!title) { feedback.textContent = '请填写报销单名称'; return; }
+   saving = true;
+   const controls = [...dialog.querySelectorAll('button,input')];
+   controls.forEach(c => c.disabled = true);
+   try {
+    await api.writeExpense(project,month,expected,{id:row?.id,title,amount:field('[name=amount]').value,attach:row ? [] : names});
+   } catch (err) {
+    feedback.textContent = err.message;
+    controls.forEach(c => c.disabled = false);
+    saving = false;
+    return;
+   }
+   close();
+   await operation(reload);
   };
-  if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');
+  if (dialog.showModal) dialog.showModal(); else dialog.setAttribute('open','');
  }
- root.addEventListener('change',e=>{const id=e.target.dataset.expenseSelect;if(id){if(e.target.checked)selected.add(id);else selected.delete(id);render()}});
- async function handle(act,value){
-  if(act==='expense-view'){archive=value==='archive';selected.clear();render();return}
-  if(!current())return;
-  if(act==='expense-add')form(null);
-  if(act==='expense-edit'){const row=rows().find(r=>r.id===value);if(row)form(row)}
-  if(act==='expense-advance'){
-   const ids=[...selected];await operation(async()=>{await api.writeExpense(...scope(),version,{action:'advance',target:value,ids});await reload()});
+ root.addEventListener('change',e => {
+  if (e.target.hasAttribute('data-pick-all')) {
+   excluded.clear();
+   if (!e.target.checked) for (const file of pending()) excluded.add(file.file.name);
+  } else if (e.target.hasAttribute('data-pick')) {
+   const name = e.target.dataset.pick;
+   if (e.target.checked) excluded.delete(name); else excluded.add(name);
+  } else return;
+  render();
+ });
+ async function handle(act,value) {
+  if (act === 'expense-view') { archive = value === 'archive'; render(); return; }
+  if (!current()) return;
+  if (act === 'expense-generate') {
+   const names = pending().map(r => r.file.name).filter(n => !excluded.has(n));
+   if (names.length) form(null,names);
+   return;
+  }
+  const row = records.find(r => r.id === value);
+  if (!row) return;
+  if (act === 'expense-edit') form(row,row.files);
+  if (act === 'expense-advance') {
+   const target = row.status === '待提交' ? '待到账' : row.status === '待到账' ? '已到账' : null;
+   if (target) await operation(async () => { await api.writeExpense(...scope(),version,{action:'advance',target,ids:[row.id]}); await reload(); });
   }
  }
- return {set,page,handle,close,editing:()=>!!dialog,archive:()=>archive,linked:name=>current()&&records.some(r=>r.files.includes(name)),
-  tabs:()=>'<div class="la-pills">'+button('view','费用明细','ledger','la-pill '+(!archive?'active':''))+button('view','原始文件','archive','la-pill '+(archive?'active':''))+'</div>'};
+ return {set,page,reset,handle,close,editing:()=>!!dialog,archive:()=>archive,linked:name=>current()&&records.some(r=>r.files.includes(name)),
+  tabs:()=>'<div class="la-pills">'+action('view','月度报销夹','ledger','la-pill '+(!archive?'active':''))+action('view','原始文件','archive','la-pill '+(archive?'active':''))+'</div>'};
 };

@@ -91,3 +91,11 @@
 @media(max-width:600px){#life-atlas-studio .la-editor-dialog{width:calc(100vw - 24px);max-width:calc(100vw - 24px)}#life-atlas-studio .la-editor-dialog .edit-grid{grid-template-columns:1fr}}
 
 #life-atlas-studio .expense-form{display:grid;gap:14px}#life-atlas-studio .expense-form label{display:block}#life-atlas-studio .expense-form input:not([type=checkbox]){display:block;margin-top:4px}#life-atlas-studio .expense-form details{overflow-wrap:anywhere}#life-atlas-studio .expense-pending{overflow-wrap:anywhere}
+
+#life-atlas-studio .expense-layout{display:grid;grid-template-columns:minmax(80px,115px) minmax(0,1fr);gap:14px;margin-top:12px}
+#life-atlas-studio .expense-months,#life-atlas-studio .expense-main,#life-atlas-studio .expense-originals{display:flex;flex-direction:column;gap:10px}
+#life-atlas-studio .expense-drop{min-height:0;padding:16px;margin:0 0 12px}
+#life-atlas-studio .expense-file,#life-atlas-studio .expense-selection{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--la-line)}
+#life-atlas-studio .expense-file .la-link{overflow-wrap:anywhere;text-align:left}
+#life-atlas-studio .expense-selection{justify-content:space-between;flex-wrap:wrap;border:0}
+@media(max-width:650px){#life-atlas-studio .expense-layout{grid-template-columns:1fr}#life-atlas-studio .expense-months{flex-direction:row;flex-wrap:wrap}}

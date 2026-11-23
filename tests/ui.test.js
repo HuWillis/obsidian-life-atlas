@@ -56,7 +56,7 @@ test('报销和投资统计覆盖其他分页，文件格式和交易类型筛�
  const a=await app(t),p=await a.store.save({kind:'project',title:'报销分页项目',goal:'验证',status:'进行中'});
  await a.store.importReceipts(p.id,testMonth,Array.from({length:25},(_,i)=>({name:'单据'+i+(i===24?'.png':'.pdf'),data:Buffer.alloc(10)})));
  for(let i=0;i<25;i++)await a.store.save({kind:'invest',title:'资产'+i,date:testMonth+'-01',type:'买入',assetType:'基金',amount:'10.00',fee:'1.00',account:'账户'});
- await a.refresh();await a.click('go','work');await a.click('go','projects');await a.click('open-record',p.id);await a.click('go','reimbursement');assert.match(a.text(),/待整理/);await a.click('expense-view','archive');assert.equal(a.root.querySelectorAll('tbody tr').length,20);assert.match(a.text(),/25 份单据 · 250 B/);
+ await a.refresh();await a.click('go','work');await a.click('go','projects');await a.click('open-record',p.id);await a.click('go','reimbursement');assert.match(a.text(),/已选 25 份/);await a.click('expense-view','archive');assert.equal(a.root.querySelectorAll('tbody tr').length,20);assert.match(a.text(),/25 份单据 · 250 B/);
  a.set(filter('receipts:'+p.id+':'+testMonth,'format'),'PNG');assert.equal(a.root.querySelectorAll('tbody tr').length,1);assert.match(a.text(),/1 份单据 · 10 B/);assert.match(a.root.querySelector('tbody').textContent,/单据24.png/);
  await a.click('go','life');await a.click('go','finance');await a.click('tab','invest');assert.equal(a.root.querySelectorAll('tbody tr').length,20);assert.match(a.root.querySelector('.finance-summary').textContent,/275.00/);a.set(filter('invest','type'),'卖出');assert.match(a.text(),/共 0 条/);assert.doesNotMatch(a.root.querySelector('.finance-summary').textContent,/275.00/);
 });
@@ -118,19 +118,55 @@ test('所有表单编辑在弹窗中打开，取消和保存保持当前页面�
  assert.equal(a.errors.length,0);
 });
 
-test('在项目工作报销弹窗补金额，批量提交并确认到账',async t=>{
- const a=await app(t),p=await a.store.save({kind:'project',title:'出差',goal:'测试',status:'进行中'});
- await a.store.importReceipts(p.id,testMonth,[{name:'车票.pdf',data:Buffer.from('a')}]);
+test('月度收票跨页默认全选、留票、生成和到账，旧记录保留且不重复入单',async t=>{
+ const a=await app(t),p=await a.store.save({kind:'project',title:'报销测试',goal:'测试',status:'进行中'});
+ const {readExpenses,writeExpense}=require('../expenses');
+ const files=Array.from({length:23},(_,i)=>({name:'车票'+i+'.pdf',data:Buffer.from('A')}));
+ await a.store.importReceipts(p.id,testMonth,files);
+ await writeExpense(a.store,p.id,testMonth,null,{attach:['车票0.pdf'],amount:'99',title:'旧单'});
  await a.refresh();await a.click('go','projects');await a.click('open-record',p.id);await a.click('go','reimbursement');
- await a.click('expense-edit','file:车票.pdf');
- const dialog=a.root.querySelector('dialog');assert.ok(dialog?.hasAttribute('open'));dialog.querySelector('[name=amount]').value='29.50';
- await dialog.querySelector('form').onsubmit({preventDefault(){}});
- assert.equal(a.root.querySelector('dialog'),null);
- for(const target of ['待到账','已到账']){
-  const check=a.root.querySelector('[data-expense-select]');check.checked=true;
+ assert.match(a.text(),/已选 22 份/);
+ const changeCheck=(selector,value)=>{
+  const check=a.root.querySelector(selector);check.checked=value;
   check.dispatchEvent(new a.root.ownerDocument.defaultView.Event('change',{bubbles:true}));
-  await a.click('expense-advance',target);
-  assert.match(a.root.querySelector('tbody').textContent,new RegExp(target));
+ };
+ changeCheck('[data-pick-all]',false);assert.ok(a.root.querySelector('[data-act="expense-generate"]').disabled);
+ changeCheck('[data-pick-all]',true);
+ const keep=a.root.querySelector('[data-pick]').dataset.pick;
+ changeCheck('[data-pick]',false);
+ await a.refresh();assert.match(a.text(),/已选 21 份/);
+ await a.click('expense-generate');let dialog=a.root.querySelector('dialog');
+ assert.equal(dialog.querySelectorAll('[data-original]').length,21);
+ dialog.querySelector('[data-dismiss]').click();
+ assert.equal((await readExpenses(a.store,p.id,testMonth)).rows.length,1);
+ await a.click('expense-generate');dialog=a.root.querySelector('dialog');
+ dialog.querySelector('[name=amount]').value='29.50';
+ await dialog.querySelector('form').onsubmit({preventDefault(){}});
+ const ledger=await readExpenses(a.store,p.id,testMonth),claim=ledger.rows[1];
+ assert.equal(claim.files.length,21);assert.ok(!claim.files.includes(keep));assert.equal(ledger.rows[0].cents,9900);
+ assert.equal(a.root.querySelectorAll('[data-pick]').length,1);
+ assert.equal(a.root.querySelector('[data-pick]').dataset.pick,keep);
+ for(const target of ['待到账','已到账']){
+  await a.click('expense-advance',claim.id);
+  assert.equal((await readExpenses(a.store,p.id,testMonth)).rows[1].status,target);
  }
- assert.equal(a.errors.length,0);assert.match(a.root.querySelector('.finance-summary').lastElementChild.textContent,/29.50/);
+ const prior=a.root.querySelector('[data-act="receipt-period"]:not(.active)').dataset.value;
+ await a.click('receipt-period',prior);assert.equal(a.root.querySelectorAll('[data-pick]').length,0);
+ await a.click('receipt-period',testMonth);assert.match(a.text(),/已选 1 份/);assert.match(a.text(),/已到账/);
+ assert.equal(a.errors.length,0);
+});
+
+test('从月度报销夹直接拖入原件后默认选中且不提前生成报销单',async t=>{
+ const a=await app(t),project=await a.store.save({kind:'project',title:'收票测试',goal:'测试',status:'进行中'});
+ await a.refresh();await a.click('go','projects');await a.click('open-record',project.id);await a.click('go','reimbursement');
+ const drop=a.root.querySelector('.receipt-drop'),event=new a.root.ownerDocument.defaultView.Event('drop',{bubbles:true,cancelable:true});
+ event.dataTransfer={files:[{name:'票据.pdf',arrayBuffer:async()=>Uint8Array.of(11,23).buffer}]};
+ drop.dispatchEvent(event);
+ for(let i=0;i<200&&!a.root.querySelector('[data-pick]');i++)await new Promise(resolve=>setTimeout(resolve,10));
+ assert.ok(event.defaultPrevented);
+ assert.equal(a.root.querySelector('[data-pick]').dataset.pick,'票据.pdf');
+ assert.match(a.text(),/已保存 1 份单据/);assert.match(a.text(),/已选 1 份/);
+ const file=(await a.store.listReceipts(project.id,testMonth))[0];assert.equal(file.file.size,2);
+ assert.equal((await require('../expenses').readExpenses(a.store,project.id,testMonth)).raw,null);
+ assert.equal(a.errors.length,0);
 });
