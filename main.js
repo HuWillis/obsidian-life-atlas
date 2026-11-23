@@ -163,6 +163,185 @@ function editor(data,requirements,message){
 module.exports={table,editor};
 
 },
+"./expenses":function(module,exports,require){
+'use strict';
+const {randomUUID}=require('node:crypto');
+const {safeName}=require('./store');
+
+const states=['待整理','待提交','待到账','已到账'];
+const looseId=name=>'file:'+name;
+function amountInCents(input){
+ const value=String(input??'').trim();
+ if(!value)return null;
+ if(!/^\d{1,9}(\.\d{1,2})?$/.test(value)||Number(value)<=0)throw new Error('金额须大于零，最多两位小数');
+ return Math.round(Number(value)*100);
+}
+function validateLedger(rows){
+ if(!Array.isArray(rows))throw new Error('报销台账格式无效');
+ const ids=new Set(),files=new Set();
+ for(const row of rows){
+  if(!row||typeof row.id!=='string'||!row.id||row.id.startsWith('file:')||ids.has(row.id)||typeof row.title!=='string'||!Array.isArray(row.files)||!row.files.length||!states.includes(row.status))throw new Error('报销台账记录无效');
+  if(row.status==='待整理'?row.cents!==null:!Number.isSafeInteger(row.cents)||row.cents<=0)throw new Error('金额与报销状态不一致');
+  ids.add(row.id);
+  for(const name of row.files){
+   if(safeName(name)!==name||files.has(name))throw new Error('单据文件名无效或已被重复关联');
+   files.add(name);
+  }
+ }
+}
+async function snapshot(store,project,month){
+ const folder=await store.receiptFolder(project,month),path=folder+'.报销.json';
+ const raw=await store.io.exists(path)?await store.io.read(path):null;
+ const rows=raw===null?[]:JSON.parse(raw);
+ validateLedger(rows);
+ return {folder,path,raw,rows};
+}
+async function readExpenses(store,project,month){
+ const {raw,rows}=await snapshot(store,project,month);
+ return {raw,rows};
+}
+function expenseRows(records,receipts){
+ const found=new Map(receipts.map(r=>[r.file.name,r])),linked=new Set(records.flatMap(r=>r.files));
+ const loose=receipts.filter(r=>!linked.has(r.file.name)).map(r=>({id:looseId(r.file.name),title:r.file.name,files:[r.file.name],status:'待整理',cents:null}));
+ return [...records,...loose].map(r=>({...r,_mtime:Math.max(...r.files.map(n=>found.get(n)?._mtime||0))}));
+}
+function writeExpense(store,project,month,expected,change){
+ return store.queue(async()=>{
+  const {folder,path,raw,rows}=await snapshot(store,project,month);
+  if(raw!==expected)throw new Error('台账已变化，请关闭弹窗并刷新后重试');
+  const receipts=await store.listReceipts(project,month),all=expenseRows(rows,receipts);
+  const uploads=change.uploads||[];
+  if(change.action==='advance'){
+   const ids=new Set(change.ids),source=change.target==='待到账'?'待提交':change.target==='已到账'?'待到账':null;
+   const picked=rows.filter(r=>ids.has(r.id));
+   if(!source||!ids.size||picked.length!==ids.size||picked.some(r=>r.status!==source))throw new Error('请选择同一报销状态的费用');
+   for(const row of picked)row.status=change.target;
+  }else{
+   const old=change.id?all.find(r=>r.id===change.id):null;
+   if(change.id&&!old)throw new Error('费用已变更，请刷新');
+   const cents=amountInCents(change.amount);
+   if(old&&states.indexOf(old.status)>=2&&cents!==old.cents)throw new Error('已提交费用的金额不可更改');
+   const files=[...(old?.files||[])],linked=new Set(rows.flatMap(r=>r.files));
+   for(const name of change.attach||[]){
+    if(linked.has(name)||!receipts.some(r=>r.file.name===name))throw new Error('所选单据已变更');
+    if(!files.includes(name))files.push(name);
+   }
+   for(const upload of uploads){
+    const name=safeName(upload.name,'文件名');
+    if(/\.(md|markdown)$/i.test(name)||files.includes(name)||linked.has(name)||await store.io.exists(folder+'/'+name))throw new Error('文件名重复或格式无效：'+name);
+    files.push(name);
+   }
+   if(!files.length)throw new Error('请至少选择一份单据');
+   const row={id:old&&!old.id.startsWith('file:')?old.id:randomUUID(),title:String(change.title||'').trim()||files[0],files,cents,status:cents===null?'待整理':old&&states.indexOf(old.status)>=2?old.status:'待提交'};
+   const index=rows.findIndex(r=>r.id===row.id);
+   if(index<0)rows.push(row);else rows[index]=row;
+  }
+  validateLedger(rows);
+  await store.io.mkdir(folder);
+  // Originals are written first. If the index write fails they remain discoverable as loose receipts.
+  const written=[];
+  try{
+   for(const upload of uploads){
+    await store.io.create(folder+'/'+safeName(upload.name),upload.data);
+    written.push(upload.name);
+   }
+   const next=JSON.stringify(rows,null,2)+'\n';
+   if(raw===null)await store.io.create(path,next);else await store.io.update(path,raw,next);
+  }catch(error){
+   if(!written.length)throw error;
+   throw new Error('台账未保存。已归档的原件：'+written.join('、')+'。请关闭弹窗并重新进入本月，从待整理单据中选择。原因：'+error.message);
+  }
+ });
+}
+module.exports={states,expenseRows,readExpenses,writeExpense};
+
+},
+"./expense-ui":function(module,exports,require){
+'use strict';
+const {states,expenseRows}=require('./expenses');
+
+module.exports=function expenseDesk({root,api,esc,btn,box,money,listView,render,operation,reload,scope}){
+ let loaded=null,version=null,records=[],receipts=[],archive=false,dialog=null;
+ const selected=new Set();
+ const key=(p,m)=>JSON.stringify([p,m]);
+ const current=()=>key(...scope())===loaded;
+ const rows=()=>current()?expenseRows(records,receipts):[];
+ const button=(action,label,id='',style='la-button secondary')=>btn('expense-'+action,label,id,style);
+ function set(project,month,ledger,files){
+  if(key(project,month)!==key(...scope()))return;
+  if(loaded!==key(project,month)||ledger.raw!==version)selected.clear();
+  loaded=key(project,month);version=ledger.raw;records=ledger.rows;receipts=files;
+ }
+ function page(){
+  const all=rows(),filters=[{key:'status',label:'报销状态',options:states.map(s=>[s,s])}];
+  const v=listView('expenses:'+loaded,all,{filters,search:r=>[r.title,...r.files].join(' '),searchLabel:'费用说明或文件名'});
+  const visibleIds=new Set(v.items.map(r=>r.id));
+  for(const id of selected)if(!visibleIds.has(id))selected.delete(id);
+  const picked=all.filter(r=>selected.has(r.id));
+  const advance=(from,to,label)=>'<button type="button" class="la-button secondary" data-act="expense-advance" data-value="'+to+'" '+(picked.length&&picked.every(r=>r.status===from)?'':'disabled')+'>'+label+'</button>';
+  const summary=states.slice(1).map(state=>box(state,'<strong>'+money(all.filter(r=>r.status===state).reduce((n,r)=>n+r.cents,0))+'</strong>')).join('');
+  const table=v.items.map(r=>`<tr><td><input type="checkbox" aria-label="选择 ${esc(r.title)}" data-expense-select="${esc(r.id)}" ${selected.has(r.id)?'checked':''}></td><td>${button('edit',esc(r.title),r.id,'la-link')}<div class="la-small la-muted">${r.files.length} 份单据 · ${esc(r.files[0])}</div></td><td>${r.cents===null?'待补金额':money(r.cents)}</td><td>${esc(r.status)}</td></tr>`).join('');
+  const actions='<div class="edit-actions">已选 '+selected.size+' 笔 '+advance('待提交','待到账','标记已提交')+advance('待到账','已到账','确认到账')+'</div>';
+  return '<div class="finance-summary">'+summary+'</div>'+box('费用明细',v.controls+actions+'<div class="ledger-scroll"><table class="ledger-table"><thead><tr><th>选择</th><th>费用 / 单据</th><th>报销金额</th><th>状态</th></tr></thead><tbody>'+table+'</tbody></table></div>'+(table?'':'<p class="la-empty">当前没有符合条件的费用。</p>')+v.pager,button('add','＋ 收单据','','la-button'));
+ }
+ function close(){dialog?.remove();dialog=null}
+ function form(row,initialFiles=[]){
+  const [project,month]=scope(),expected=version;
+  const files=new Map(),assigned=new Set(records.flatMap(r=>r.files));
+  const candidates=receipts.filter(r=>!assigned.has(r.file.name)&&!row?.files.includes(r.file.name));
+  const originals=(row?.files||[]).map(name=>{
+   const f=receipts.find(r=>r.file.name===name);
+   return f?'<button type="button" class="la-link" data-original="'+esc(f._path)+'">'+esc(name)+'</button>':esc(name)+'（文件缺失）';
+  });
+  dialog=root.ownerDocument.createElement('dialog');dialog.className='la-editor-dialog';dialog.setAttribute('aria-label',row?'编辑报销费用':'收单据');
+  dialog.innerHTML=box(row?'编辑报销费用':'收单据',`<form class="expense-form"><p class="la-caption">${esc(month)} · 同一笔费用可附多份单据</p>${originals.join(' · ')}
+  <label>添加原始单据<input type="file" multiple></label><div class="expense-pending"></div>
+  ${candidates.length?'<details><summary>从本月待整理单据中选择（'+candidates.length+'）</summary>'+candidates.map(r=>'<label><input type="checkbox" value="'+esc(r.file.name)+'"> '+esc(r.file.name)+'</label>').join('')+'</details>':''}
+  <label>费用说明<input class="la-input" name="title" maxlength="160" value="${esc(row?.title||'')}" placeholder="可稍后填写"></label>
+  <label>报销金额（元）<input class="la-input" name="amount" type="number" min="0.01" step="0.01" value="${row?.cents!=null?(row.cents/100).toFixed(2):''}" ${row&&states.indexOf(row.status)>=2?'readonly':''} placeholder="可稍后填写"></label>
+  <p role="alert" class="la-feedback"></p><div class="edit-actions"><button type="button" class="la-button secondary" data-dismiss>取消</button><button type="submit" class="la-button">保存</button></div></form>`);
+  root.append(dialog);
+  const field=s=>dialog.querySelector(s),feedback=field('[role=alert]'),picker=field('[type=file]');
+  let saving=false;
+  function add(picks){
+   const skipped=[];
+   for(const f of picks){if(/\.(md|markdown)$/i.test(f.name)||files.has(f.name)||receipts.some(r=>r.file.name===f.name))skipped.push(f.name);else files.set(f.name,f);}
+   field('.expense-pending').textContent=[...files.keys()].join(' · ');
+   feedback.textContent=skipped.length?'已跳过同名文件或 Markdown：'+skipped.join('、'):'';
+  }
+  add(initialFiles);
+  picker.onchange=()=>{add(picker.files);picker.value=''};
+  dialog.ondragover=e=>e.preventDefault();dialog.ondrop=e=>{e.preventDefault();if(!saving)add(e.dataTransfer.files)};
+  dialog.querySelectorAll('[data-original]').forEach(b=>b.onclick=()=>api.open(b.dataset.original).catch(e=>feedback.textContent=e.message));
+  field('[data-dismiss]').onclick=()=>{if(!saving)close()};
+  dialog.oncancel=e=>{e.preventDefault();if(!saving)close()};
+  field('form').onsubmit=async e=>{
+   e.preventDefault();if(saving)return;saving=true;
+   const controls=[...dialog.querySelectorAll('button,input')];controls.forEach(c=>c.disabled=true);
+   try{
+    const uploads=await Promise.all([...files.values()].map(async f=>({name:f.name,data:await f.arrayBuffer()})));
+    const attach=[...dialog.querySelectorAll('[type=checkbox]:checked')].map(c=>c.value);
+    await api.writeExpense(project,month,expected,{id:row?.id,title:field('[name=title]').value,amount:field('[name=amount]').value,attach,uploads});
+   }catch(err){feedback.textContent=err.message;controls.forEach(c=>c.disabled=false);saving=false;return}
+   close();await operation(reload);
+  };
+  if(dialog.showModal)dialog.showModal();else dialog.setAttribute('open','');
+ }
+ root.addEventListener('change',e=>{const id=e.target.dataset.expenseSelect;if(id){if(e.target.checked)selected.add(id);else selected.delete(id);render()}});
+ async function handle(act,value){
+  if(act==='expense-view'){archive=value==='archive';selected.clear();render();return}
+  if(!current())return;
+  if(act==='expense-add')form(null);
+  if(act==='expense-edit'){const row=rows().find(r=>r.id===value);if(row)form(row)}
+  if(act==='expense-advance'){
+   const ids=[...selected];await operation(async()=>{await api.writeExpense(...scope(),version,{action:'advance',target:value,ids});await reload()});
+  }
+ }
+ return {set,page,handle,close,editing:()=>!!dialog,archive:()=>archive,linked:name=>current()&&records.some(r=>r.files.includes(name)),
+  tabs:()=>'<div class="la-pills">'+button('view','费用明细','ledger','la-pill '+(!archive?'active':''))+button('view','原始文件','archive','la-pill '+(archive?'active':''))+'</div>'};
+};
+
+},
 "./ui":function(module,exports,require){
 
 'use strict';
@@ -234,7 +413,7 @@ const workItems=[['projects','项目中心','目标、需求、开发与交付',
 const lifeItems=[['dailyplan','日常事务','安排今天、时间与完成状态','calendar-check'],['health','健康与运动','运动计划与完成记录','heart-pulse'],['finance','家庭与财务','日常收支与投资流水','wallet'],['travel','行程规划','路线、交通住宿与出发清单','map'],['interests','兴趣活动','安排活动、记录体验','palette']];
 const learnItems=[['ai','AI工程','模型、RAG、Agent 与评测','sparkles'],['software','软件工程','原理、实践与技术笔记','code-2'],['reading','阅读与课程','进度、章节与学习记录','library']];
 function domain(p){const items=p==='work'?workItems:p==='life'?lifeItems:learnItems;return hero(names[p]+'首页',p==='work'?'推进项目，沉淀业务与方法。':p==='life'?'安排日常，也为生活体验留出位置。':'带着问题学习，通过实践留下结论。')+cards(items)+`<section class="la-section">${p==='learn'?box('最近的学习收获',learned(),go('software','查看学习笔记 ↗')+go('inbox','学习收件箱 ↗')):planner('',p==='work'?'工作':'生活',true)}</section>`;}
-function projectPage(){const p=currentProject();return hero(p.title,p.goal,btn('edit','编辑项目',p.id))+`<div class="la-notice">${esc(p.status)} · 下一步：${esc(p.next||'待明确')} · 目标日期：${esc(p.due||'未设置')}</div>`+cards(projectKinds.map(k=>[k,labels[k],{requirements:'新增需求与验收标准',decisions:'比较方案，记录决策',development:'记录实现、复现与修复',validation:'执行验收，记录交付'}[k],{requirements:'file-check',decisions:'git-branch',development:'code-2',validation:'check-check'}[k]]).concat([['schedule','排期与分工','拆分需求，安排时间与负责人','calendar-range'],['reimbursement','工作报销','按项目和月份存放原始单据','files']]))+`<section class="la-section">${planner(projectId)}</section>`;}
+function projectPage(){const p=currentProject();return hero(p.title,p.goal,btn('edit','编辑项目',p.id))+`<div class="la-notice">${esc(p.status)} · 下一步：${esc(p.next||'待明确')} · 目标日期：${esc(p.due||'未设置')}</div>`+cards(projectKinds.map(k=>[k,labels[k],{requirements:'新增需求与验收标准',decisions:'比较方案，记录决策',development:'记录实现、复现与修复',validation:'执行验收，记录交付'}[k],{requirements:'file-check',decisions:'git-branch',development:'code-2',validation:'check-check'}[k]]).concat([['schedule','排期与分工','拆分需求，安排时间与负责人','calendar-range'],['reimbursement','工作报销','收单据，跟进提交与到账','files']]))+`<section class="la-section">${planner(projectId)}</section>`;}
 function travelPage(){const rows=scoped('trip',''),v=listView('trip:',rows,{dates:true,sort:'date-desc'},{period:'all',month:TODAY.slice(0,7)});return hero('行程规划','先安排去哪里、哪天去，再规划每天怎么走。',listActions('trip'))+box('我的行程',v.controls+(v.items.length?v.items.map(t=>`<div class="la-row"><div>${btn('open-trip',esc(t.title),t.id,'la-link')}<p class="la-small la-muted">${esc(t.destination)} · ${esc(t.start)} 至 ${esc(t.end)}</p></div>${btn('open-trip','规划每日路线',t.id,'la-button secondary')}</div>`).join(''):empty('没有符合条件的行程。新建行程后，可继续添加每日路线与出发前待办。'))+v.pager);}
 function tripPage(){const t=get(tripId),v=listView('stop:'+tripId,scoped('stop',tripId),{dates:true,sort:'date-asc'},{period:'all',month:TODAY.slice(0,7)});return hero(t.title,`${esc(t.destination)} · ${esc(t.start)} 至 ${esc(t.end)}`,btn('edit','编辑行程',t.id))+`<div class="finance-summary">${box('往返交通',`<p class="la-small">${esc(t.transport||'尚未安排')}</p>`)}${box('住宿',`<p class="la-small">${esc(t.stay||'尚未安排')}</p>`)}${box('预算',`<strong>${t.budget?money(amount(t.budget)):'未设置'}</strong>`)}</div><section class="la-section">${box('每日路线',v.controls+(v.items.length?`<div class="trip-timeline">${v.items.map(s=>`<div class="la-row"><div><span class="la-tag">${esc(s.date)} ${esc(s.time)}</span><h3>${esc(s.title)}</h3><p class="la-small la-muted">${esc(s.transport)} ${esc(s.note)}</p></div>${btn('edit','编辑',s.id,'la-link')}</div>`).join('')}</div>`:empty('没有符合条件的路线。可添加每日安排，规划地点、时间和交通。'))+v.pager,listActions('stop'))}</section><section class="la-section">${box('出发前待办',taskList(tasks.filter(x=>x.context===tripId),'departure:'+tripId),btn('new-task','＋ 添加出发待办',tripId))}</section>`;}
 function topicPage(p){return hero(labels[p],{models:'记录提示词、模型表现与验证依据。',rag:'从检索问题到可复现的对照实验。',agent:'记录工具调用、规划与失败处理。',evaluation:'明确基线、指标与验收结果。',software:'把工程问题整理为可复用的实践。'}[p])+`<div class="la-pills">${['学习笔记','实践实验','学习安排'].map((t,i)=>btn('tab',t,String(i),'la-pill '+((tab||'0')===String(i)?'active':''))).join('')}</div>`+((tab||'0')==='0'?center('study',p):tab==='1'?center('experiment',p):planner(p));}
@@ -274,6 +453,7 @@ if(act==='list-clear'){const state=listState(b.dataset.listKey);for(const key of
 if(act==='open-path'){await operation(()=>api.open(value));return;}
 if(act==='open-file'){const r=[...records,...tasks,...inbox].find(x=>x.id===value);if(r)await operation(()=>api.open(r._path,{edit:!!schemas[r.kind]?.document}));return;}
 if(act==='retry-open'&&pendingOpen){await operation(async()=>{await openDocument(pendingOpen);message='已打开正文。';});return;}
+if(act.startsWith('expense-')){await expenses.handle(act,value);return;}
 if(act==='receipt-open'){await operation(()=>api.open(value));return;}
 if(act==='receipt-remove'){await operation(async()=>{const r=receipts.find(x=>x.id===value);receiptRemoved=await api.remove(r);receiptStatus='已移入本地回收站，可撤销。';await reloadReceipts();});return;}
 if(act==='receipt-undo'&&receiptRemoved){await operation(async()=>{await api.restore(receiptRemoved);receiptRemoved=null;receiptStatus='已恢复单据。';await reloadReceipts();});return;}
@@ -297,16 +477,17 @@ root.addEventListener('input',e=>{const t=e.target;if(t.dataset.listFilter){if(!
 root.addEventListener('change',async e=>{const t=e.target;if(updateList(t))return;if(t.id?.startsWith('schedule-')){const key=t.id.slice(9);if(Object.hasOwn(scheduleState(),key)){scheduleState()[key]=t.value;scheduleState().page=1;render();return;}}if(t.dataset.field&&editor)editor.data[t.dataset.field]=t.value;if(t.id==='capture-kind')draftType=t.value;if(t.dataset.check){const r=tasks.find(x=>x.id===t.dataset.check);await operation(async()=>{await api.save({...r,done:t.checked});replaceAll(await api.load());});}if(t.id==='plan-date'&&t.value){planDate=t.value;render();}if(t.id==='finance-month'&&t.value){month=t.value;listState(tab==='invest'?'invest':'cash').page=1;message='';render();}});
 const receipts=[];
 let receiptMonth=TODAY.slice(0,7),receiptRemoved=null,receiptStatus='';
+const expenses=require('./expense-ui')({root,api,esc,btn,box,money,listView,render,operation,reload:reloadReceipts,scope:()=>[projectId,receiptMonth]});
 const fileSize=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':n>=1024?(n/1024).toFixed(1)+' KB':n+' B';
-function reimbursement(){const p=currentProject(),base=receipts.filter(r=>r.project===projectId&&r.month===receiptMonth),format=r=>r.file.name.includes('.')?r.file.name.split('.').pop().toUpperCase():'文件',v=listView('receipts:'+projectId+':'+receiptMonth,base,{searchLabel:'搜索文件名',filters:[{key:'format',label:'文件格式',options:[...new Set(base.map(format))].sort().map(x=>[x,x]),value:format}]}),rows=v.matched;return hero('工作报销',p.title+' / '+receiptMonth+' · 单据文件归档',go('project','返回项目','la-button secondary'))+`<div class="finance-toolbar"><div class="finance-filters"><label>所属项目<select class="la-input" id="receipt-project">${scoped('project','').map(r=>`<option value="${esc(r.id)}"${r.id===projectId?' selected':''}>${esc(r.title)}</option>`).join('')}</select></label><label>报销月份<input class="la-input" id="receipt-month" type="month" value="${esc(receiptMonth)}"></label></div><span class="la-tag">${rows.length} 份单据 · ${fileSize(rows.reduce((n,r)=>n+r.file.size,0))}</span></div><section class="receipt-drop" aria-label="添加报销单据"><div>${icon('files')}<h2>把这个月的单据放在这里</h2><p>PDF、照片、OFD、表格等原始文件，可一次选择多个。</p></div><label class="receipt-picker">选择单据文件<input id="receipt-files" type="file" multiple aria-label="选择单据文件"></label><p class="la-caption">也可拖入文件 · 保留文件名和格式 · 同名文件不覆盖</p></section><p class="la-feedback" role="status">${esc(receiptStatus)} ${receiptRemoved?btn('receipt-undo','撤销移除','','la-link'):''}</p><section class="la-section">${box(receiptMonth+' 单据',v.controls+(v.items.length?`<div class="ledger-scroll"><table class="ledger-table"><thead><tr><th>文件名</th><th>格式</th><th>大小</th><th>归属月份</th><th>操作</th></tr></thead><tbody>${v.items.map(r=>`<tr><td class="receipt-name">${esc(r.file.name)}</td><td>${esc(r.file.name.includes('.')?r.file.name.split('.').pop().toUpperCase():'文件')}</td><td>${fileSize(r.file.size)}</td><td>${esc(r.month)}</td><td>${btn('receipt-open','打开',r.id,'la-link')} · ${btn('receipt-remove','移除',r.id,'la-link')}</td></tr>`).join('')}</tbody></table></div>`:empty(base.length?'没有符合筛选条件的单据。':'这个项目本月还没有单据，直接选择文件即可。'))+v.pager)}</section><div class="la-notice">单据归档位置：90 附件 / 工作报销 / ${esc(p._folder||p.title)} / ${esc(receiptMonth)} / 原始文件<br>单据已保存在本地笔记库，沿用既有 Git 自动同步。重名文件跳过，不覆盖。</div>`;}
-async function reloadReceipts(){const rows=await api.listReceipts(projectId,receiptMonth);receipts.splice(0,receipts.length,...rows);}
+function reimbursement(){const p=currentProject(),base=receipts.filter(r=>r.project===projectId&&r.month===receiptMonth),format=r=>r.file.name.includes('.')?r.file.name.split('.').pop().toUpperCase():'文件',v=listView('receipts:'+projectId+':'+receiptMonth,base,{searchLabel:'搜索文件名',filters:[{key:'format',label:'文件格式',options:[...new Set(base.map(format))].sort().map(x=>[x,x]),value:format}]}),rows=v.matched;return hero('工作报销',p.title+' / '+receiptMonth+' · 费用与原始单据',go('project','返回项目','la-button secondary'))+`<div class="finance-toolbar"><div class="finance-filters"><label>所属项目<select class="la-input" id="receipt-project">${scoped('project','').map(r=>`<option value="${esc(r.id)}"${r.id===projectId?' selected':''}>${esc(r.title)}</option>`).join('')}</select></label><label>报销月份<input class="la-input" id="receipt-month" type="month" value="${esc(receiptMonth)}"></label></div></div>${expenses.tabs()}`+(expenses.archive()?`<span class="la-tag">${rows.length} 份单据 · ${fileSize(rows.reduce((n,r)=>n+r.file.size,0))}</span><section class="receipt-drop" aria-label="添加报销单据"><div>${icon('files')}<h2>把这个月的单据放在这里</h2><p>PDF、照片、OFD、表格等原始文件，可一次选择多个。</p></div><label class="receipt-picker">选择单据文件<input id="receipt-files" type="file" multiple aria-label="选择单据文件"></label><p class="la-caption">也可拖入文件 · 保留文件名和格式 · 同名文件不覆盖</p></section><p class="la-feedback" role="status">${esc(receiptStatus)} ${receiptRemoved?btn('receipt-undo','撤销移除','','la-link'):''}</p><section class="la-section">${box(receiptMonth+' 单据',v.controls+(v.items.length?`<div class="ledger-scroll"><table class="ledger-table"><thead><tr><th>文件名</th><th>格式</th><th>大小</th><th>归属月份</th><th>操作</th></tr></thead><tbody>${v.items.map(r=>`<tr><td class="receipt-name">${esc(r.file.name)}</td><td>${esc(r.file.name.includes('.')?r.file.name.split('.').pop().toUpperCase():'文件')}</td><td>${fileSize(r.file.size)}</td><td>${esc(r.month)}</td><td>${btn('receipt-open','打开',r.id,'la-link')}${expenses.linked(r.file.name)?'': ' · '+btn('receipt-remove','移除',r.id,'la-link')}</td></tr>`).join('')}</tbody></table></div>`:empty(base.length?'没有符合筛选条件的单据。':'这个项目本月还没有单据，直接选择文件即可。'))+v.pager)}</section><div class="la-notice">单据归档位置：90 附件 / 工作报销 / ${esc(p._folder||p.title)} / ${esc(receiptMonth)} / 原始文件<br>单据已保存在本地笔记库，沿用既有 Git 自动同步。重名文件跳过，不覆盖。</div>`:expenses.page());}
+async function reloadReceipts(){const project=projectId,period=receiptMonth;const [rows,ledger]=await Promise.all([api.listReceipts(project,period),api.readExpenses(project,period)]);if(project!==projectId||period!==receiptMonth)return;receipts.splice(0,receipts.length,...rows);expenses.set(project,period,ledger,rows);}
 async function addReceipts(files){const selectedFiles=Array.from(files);await operation(async()=>{const data=[];for(const f of selectedFiles)data.push({name:f.name,data:await f.arrayBuffer()});const result=await api.importReceipts(projectId,receiptMonth,data);receiptStatus=`已保存 ${result.added} 份单据。`+(result.duplicate?` ${result.duplicate} 个同名文件已跳过。`:'')+(result.markdown?` ${result.markdown} 个 Markdown 文件未添加，请使用原始单据。`:'');await reloadReceipts();});}
 root.addEventListener('change',async e=>{const t=e.target;if(t.id==='receipt-files'){addReceipts(t.files);}if(t.id==='receipt-month'&&t.value){receiptMonth=t.value;receiptStatus='';await operation(reloadReceipts);}if(t.id==='receipt-project'){projectId=t.value;receiptStatus='';await operation(reloadReceipts);}});
 root.addEventListener('dragover',e=>{if(e.target.closest('.receipt-drop'))e.preventDefault();});
 root.addEventListener('drop',e=>{if(e.target.closest('.receipt-drop')){e.preventDefault();addReceipts(e.dataTransfer.files);}});
 
 render();
-return {async refresh(){if(disposed||busy)return;replaceAll(await api.load());if(page==='reimbursement'&&currentProject())await reloadReceipts();if(!editor&&!draft.trim())render();},dispose(){disposed=true;},refreshWeather(){const el=root.querySelector('.studio-weather');if(el){el.innerHTML=api.weatherHTML();api.icons(el);}}};
+return {async refresh(){if(disposed||busy||expenses.editing())return;replaceAll(await api.load());if(page==='reimbursement'&&currentProject())await reloadReceipts();if(!editor&&!draft.trim())render();},dispose(){disposed=true;expenses.close();},refreshWeather(){const el=root.querySelector('.studio-weather');if(el){el.innerHTML=api.weatherHTML();api.icons(el);}}};
 };
 
 },
@@ -315,6 +496,7 @@ return {async refresh(){if(disposed||busy)return;replaceAll(await api.load());if
 const {Plugin,ItemView,Notice,parseYaml,requestUrl,setIcon,TFile}=require('obsidian');
 const {Store}=require('./store');
 const mount=require('./ui');
+const {readExpenses,writeExpense}=require('./expenses');
 const shell=require('./shell');
 const TYPE='life-atlas-workbench';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -323,7 +505,7 @@ function weatherLabel(code){if(code===0)return '晴';if([1,2,3].includes(code))r
 class AtlasView extends ItemView{
  constructor(leaf,plugin){super(leaf);this.plugin=plugin;}
  getViewType(){return TYPE}getDisplayText(){return '人生地图 · 工作台'}getIcon(){return 'layout-dashboard'}
- async onOpen(){this.contentEl.empty();const root=this.contentEl.createDiv({attr:{id:'life-atlas-studio','aria-label':'人生地图工作台'}});root.innerHTML=shell;this.root=root;try{const all=await this.plugin.store.load();this.ui=mount(root,{load:()=>this.plugin.store.load(),getScroll:()=>this.contentEl.scrollTop,setScroll:y=>{this.contentEl.scrollTop=y;},scrollTop:()=>{this.contentEl.scrollTop=0;},save:r=>this.plugin.store.save(r),createDocument:r=>this.plugin.store.createDocument(r),remove:r=>this.plugin.store.remove(r),restore:t=>this.plugin.store.restore(t),importReceipts:(...a)=>this.plugin.store.importReceipts(...a),listReceipts:(...a)=>this.plugin.store.listReceipts(...a),open:(p,options)=>this.plugin.openNoteFile(p,options),icons:el=>{for(const i of el.querySelectorAll('[data-lucide]')){setIcon(i,i.dataset.lucide);if(i.firstElementChild)i.replaceWith(i.firstElementChild)}},error:e=>new Notice('工作台：'+e.message,8000),weatherHTML:()=>this.plugin.weatherHTML()},all);}catch(e){root.querySelector('.la-content').textContent='暂时无法读取笔记库：'+e.message;new Notice(e.message,10000)}}
+ async onOpen(){this.contentEl.empty();const root=this.contentEl.createDiv({attr:{id:'life-atlas-studio','aria-label':'人生地图工作台'}});root.innerHTML=shell;this.root=root;try{const all=await this.plugin.store.load();this.ui=mount(root,{load:()=>this.plugin.store.load(),getScroll:()=>this.contentEl.scrollTop,setScroll:y=>{this.contentEl.scrollTop=y;},scrollTop:()=>{this.contentEl.scrollTop=0;},save:r=>this.plugin.store.save(r),createDocument:r=>this.plugin.store.createDocument(r),remove:r=>this.plugin.store.remove(r),restore:t=>this.plugin.store.restore(t),readExpenses:(...a)=>readExpenses(this.plugin.store,...a),writeExpense:(...a)=>writeExpense(this.plugin.store,...a),importReceipts:(...a)=>this.plugin.store.importReceipts(...a),listReceipts:(...a)=>this.plugin.store.listReceipts(...a),open:(p,options)=>this.plugin.openNoteFile(p,options),icons:el=>{for(const i of el.querySelectorAll('[data-lucide]')){setIcon(i,i.dataset.lucide);if(i.firstElementChild)i.replaceWith(i.firstElementChild)}},error:e=>new Notice('工作台：'+e.message,8000),weatherHTML:()=>this.plugin.weatherHTML()},all);}catch(e){root.querySelector('.la-content').textContent='暂时无法读取笔记库：'+e.message;new Notice(e.message,10000)}}
  async onClose(){this.ui?.dispose();}
 }
 module.exports=class AtlasPlugin extends Plugin{

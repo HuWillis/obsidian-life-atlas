@@ -21,3 +21,40 @@ test('损坏日期或正文只隔离该文件，显示路径与原因，正常�
 
 test('排期允许先拆任务后定日期，关联需求并真实保存，重名任务不覆盖',async t=>{const {store,io}=await setup(t);const p=await store.save(project);const req=await store.save({kind:'requirements',context:p.id,title:'需求',goal:'目标',accept:'验收',status:'草稿'});const task={kind:'schedule',context:p.id,requirement:req.id,title:'接口 / 开发',owner:'',collaborators:'协作者',start:'',end:'',hours:'2.5',status:'未开始',note:'分工说明'};const a=await store.save(task),b=await store.save(task);assert.notEqual(a._path,b._path);assert.equal(a._path.split('/').length,5);assert.match(a._path,/排期与分工/);const all=await new Store(io).load();const saved=all.find(x=>x.id===a.id);assert.equal(saved.hours,'2.5');assert.equal(saved.note,'分工说明');assert.equal(saved.requirement,req.id);const tok=await store.remove(a);assert.equal((await store.load()).filter(x=>x.kind==='schedule').length,1);await store.restore(tok);assert.equal((await store.load()).filter(x=>x.kind==='schedule').length,2);});
 test('排期拒绝跨项目关联、错误日期和工时；需求删除后不丢失原任务',async t=>{const {store}=await setup(t);const p=await store.save(project),q=await store.save({...project,title:'项目乙'});const req=await store.save({kind:'requirements',context:q.id,title:'乙需求',goal:'目标',accept:'验收',status:'草稿'});const base={kind:'schedule',context:p.id,title:'任务',status:'未开始'};await assert.rejects(()=>store.save({...base,requirement:req.id}),/需求/);await assert.rejects(()=>store.save({...base,requirement:'missing'}),/需求/);for(const hours of ['-1','NaN','Infinity','abc'])await assert.rejects(()=>store.save({...base,hours}),/工时|数字/);await assert.rejects(()=>store.save({...base,start:'2026-11-10',end:'2026-11-09'}),/结束/);await assert.rejects(()=>store.save({...base,start:'2026-02-30'}),/日期/);await assert.rejects(()=>store.save({...base,context:'missing'}),/项目/);const saved=await store.save({...base,context:q.id,requirement:req.id});await store.remove(req);const rows=await store.load();assert.deepEqual(rows.warnings,[]);assert.equal(rows.find(x=>x.id===saved.id).requirement,req.id);await store.save({...rows.find(x=>x.id===saved.id),owner:'负责人'});assert.equal((await store.load()).find(x=>x.id===saved.id).owner,'负责人');});
+
+test('报销原件合并为一笔，按月独立持久化，冲突与非法批次不覆盖账目',async t=>{
+ const {writeExpense,readExpenses,expenseRows}=require('../expenses');
+ const {store,io}=await setup(t),p=await store.save(project),month='2026-11';
+ const scope=[store,p.id,month],read=()=>readExpenses(...scope);
+ await store.importReceipts(p.id,month,[{name:'已有.pdf',data:Buffer.from('old')}]);
+ assert.equal(expenseRows([],await store.listReceipts(p.id,month))[0].status,'待整理');
+ await writeExpense(...scope,null,{id:'file:已有.pdf',title:'车费',amount:'48.60',uploads:[{name:'行程单.jpg',data:Buffer.from('new')}]});
+ const ledger=await read(),row=ledger.rows[0];
+ assert.equal(row.cents,4860);assert.equal(row.status,'待提交');assert.deepEqual(row.files,['已有.pdf','行程单.jpg']);
+ assert.equal(expenseRows(ledger.rows,await store.listReceipts(p.id,month)).length,1);
+ assert.equal(await io.read('90 附件/工作报销/项目甲/2026-11/已有.pdf'),'old');
+ await assert.rejects(writeExpense(...scope,null,{id:row.id,amount:'12'}),/已变化/);
+ await assert.rejects(writeExpense(...scope,ledger.raw,{action:'advance',ids:[row.id,'missing'],target:'待到账'}),/同一报销状态/);
+ assert.equal((await read()).raw,ledger.raw);
+ await writeExpense(...scope,ledger.raw,{action:'advance',target:'待到账',ids:[row.id]});
+ const submitted=await read();
+ await assert.rejects(writeExpense(...scope,submitted.raw,{id:row.id,amount:'12'}),/不可更改/);
+ await writeExpense(...scope,submitted.raw,{action:'advance',target:'已到账',ids:[row.id]});
+ assert.equal((await readExpenses(new Store(io),p.id,month)).rows[0].status,'已到账');
+ assert.deepEqual((await readExpenses(store,p.id,'2026-12')).rows,[]);
+});
+
+test('收多份原件失败后可用待整理单据重试，不覆盖或重复计算',async t=>{
+ const {writeExpense,readExpenses,expenseRows}=require('../expenses');
+ const {store,io}=await setup(t),p=await store.save(project),scope=[store,p.id,'2026-11'];
+ const create=io.create;io.create=async(path,data)=>{if(path.endsWith('2.pdf'))throw new Error('写入失败');return create(path,data)};
+ const uploads=['1.pdf','2.pdf'].map(name=>({name,data:Buffer.from(name)}));
+ await assert.rejects(writeExpense(...scope,null,{uploads}),/台账未保存.*1.pdf/);
+ io.create=create;
+ assert.equal((await readExpenses(...scope)).raw,null);
+ const receipts=await store.listReceipts(p.id,'2026-11');
+ assert.deepEqual(expenseRows([],receipts).map(r=>r.files),[['1.pdf']]);
+ await writeExpense(...scope,null,{attach:['1.pdf'],uploads:uploads.slice(1)});
+ let ledger=await readExpenses(...scope);assert.deepEqual(ledger.rows[0].files,['1.pdf','2.pdf']);assert.equal(ledger.rows[0].status,'待整理');
+ await assert.rejects(writeExpense(...scope,ledger.raw,{uploads:uploads.slice(0,1)}),/重复/);
+});

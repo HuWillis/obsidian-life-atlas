@@ -89,3 +89,5 @@
 #life-atlas-studio .la-editor-dialog textarea{min-height:140px;resize:vertical}
 #life-atlas-studio .la-editor-dialog .edit-actions{position:sticky;bottom:-1px;z-index:1;justify-content:flex-end;padding:16px 0;margin-bottom:0;background:var(--la-panel);border-top:1px solid var(--la-line)}
 @media(max-width:600px){#life-atlas-studio .la-editor-dialog{width:calc(100vw - 24px);max-width:calc(100vw - 24px)}#life-atlas-studio .la-editor-dialog .edit-grid{grid-template-columns:1fr}}
+
+#life-atlas-studio .expense-form{display:grid;gap:14px}#life-atlas-studio .expense-form label{display:block}#life-atlas-studio .expense-form input:not([type=checkbox]){display:block;margin-top:4px}#life-atlas-studio .expense-form details{overflow-wrap:anywhere}#life-atlas-studio .expense-pending{overflow-wrap:anywhere}
